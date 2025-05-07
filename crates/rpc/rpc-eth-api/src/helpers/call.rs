@@ -3,7 +3,8 @@
 
 use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
 use crate::{
-    helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
+    helpers::call_response::ExtendedEthCallResponse, helpers::estimate::EstimateCall, FromEvmError,
+    FullEthApiTypes, RpcBlock, RpcNodeCore,
 };
 use alloy_consensus::BlockHeader;
 use alloy_eips::eip2930::AccessListResult;
@@ -12,7 +13,7 @@ use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
     transaction::TransactionRequest,
-    BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
+    BlockId, Bundle, StateContext, TransactionInfo,
 };
 use futures::Future;
 use reth_errors::{ProviderError, RethError};
@@ -228,7 +229,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         bundles: Vec<Bundle>,
         state_context: Option<StateContext>,
         mut state_override: Option<StateOverride>,
-    ) -> impl Future<Output = Result<Vec<Vec<EthCallResponse>>, Self::Error>> + Send {
+    ) -> impl Future<Output = Result<Vec<Vec<ExtendedEthCallResponse>>, Self::Error>> + Send {
         async move {
             // Check if the vector of bundles is empty
             if bundles.is_empty() {
@@ -317,14 +318,14 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                         match ensure_success::<_, Self::Error>(res.result) {
                             Ok(output) => {
-                                bundle_results.push(EthCallResponse {
+                                bundle_results.push(ExtendedEthCallResponse {
                                     value: Some(output),
                                     error: None,
                                     gas_used: Some(gas_used),
                                 });
                             }
                             Err(err) => {
-                                bundle_results.push(EthCallResponse {
+                                bundle_results.push(ExtendedEthCallResponse {
                                     value: None,
                                     error: Some(err.to_string()),
                                     gas_used: Some(gas_used),
