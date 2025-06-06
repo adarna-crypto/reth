@@ -8,14 +8,15 @@ use alloy_rpc_types_eth::{
     simulate::{SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
     transaction::TransactionRequest,
-    BlockOverrides, Bundle, EIP1186AccountProofResponse, EthCallResponse, FeeHistory, Index,
-    StateContext, SyncStatus, Work,
+    BlockOverrides, Bundle, EIP1186AccountProofResponse, FeeHistory, Index, StateContext,
+    SyncStatus, Work,
 };
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use tracing::trace;
 
+use crate::helpers::call_response::ExtendedEthCallResponse;
 use crate::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
     RpcBlock, RpcHeader, RpcReceipt, RpcTransaction,
@@ -235,7 +236,7 @@ pub trait EthApi<T: RpcObject, B: RpcObject, R: RpcObject, H: RpcObject> {
         bundles: Vec<Bundle>,
         state_context: Option<StateContext>,
         state_override: Option<StateOverride>,
-    ) -> RpcResult<Vec<Vec<EthCallResponse>>>;
+    ) -> RpcResult<Vec<Vec<ExtendedEthCallResponse>>>;
 
     /// Generates an access list for a transaction.
     ///
@@ -248,6 +249,8 @@ pub trait EthApi<T: RpcObject, B: RpcObject, R: RpcObject, H: RpcObject> {
     /// consumed when the access list is added. That is, it gives you the list of addresses and
     /// storage keys that will be used by that transaction, plus the gas consumed if the access
     /// list is included. Like `eth_estimateGas`, this is an estimation; the list could change
+    /// storage keys that will be used by the transaction, plus the gas consumed if the access
+    /// list is included. Like eth_estimateGas, this is an estimation; the list could change
     /// when the transaction is actually mined. Adding an accessList to your transaction does
     /// not necessary result in lower gas usage compared to a transaction without an access
     /// list.
@@ -680,7 +683,7 @@ where
         bundles: Vec<Bundle>,
         state_context: Option<StateContext>,
         state_override: Option<StateOverride>,
-    ) -> RpcResult<Vec<Vec<EthCallResponse>>> {
+    ) -> RpcResult<Vec<Vec<ExtendedEthCallResponse>>> {
         trace!(target: "rpc::eth", ?bundles, ?state_context, ?state_override, "Serving eth_callMany");
         Ok(EthCall::call_many(self, bundles, state_context, state_override).await?)
     }
