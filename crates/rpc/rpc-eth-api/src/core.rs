@@ -11,14 +11,16 @@ use alloy_primitives::{Address, Bytes, B256, B64, U256, U64};
 use alloy_rpc_types_eth::{
     simulate::{SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
-    BlockOverrides, Bundle, EIP1186AccountProofResponse, EthCallResponse, FeeHistory, Index,
-    StateContext, SyncStatus, Work,
+    BlockOverrides, Bundle, EIP1186AccountProofResponse, FeeHistory, Index, StateContext,
+    SyncStatus, Work,
 };
 use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use tracing::trace;
+
+use crate::helpers::call_response::ExtendedEthCallResponse;
 
 /// Helper trait, unifies functionality that must be supported to implement all RPC methods for
 /// server.
@@ -236,7 +238,7 @@ pub trait EthApi<TxReq: RpcObject, T: RpcObject, B: RpcObject, R: RpcObject, H: 
         bundles: Vec<Bundle<TxReq>>,
         state_context: Option<StateContext>,
         state_override: Option<StateOverride>,
-    ) -> RpcResult<Vec<Vec<EthCallResponse>>>;
+    ) -> RpcResult<Vec<Vec<ExtendedEthCallResponse>>>;
 
     /// Generates an access list for a transaction.
     ///
@@ -688,7 +690,7 @@ where
         bundles: Vec<Bundle<RpcTxReq<T::NetworkTypes>>>,
         state_context: Option<StateContext>,
         state_override: Option<StateOverride>,
-    ) -> RpcResult<Vec<Vec<EthCallResponse>>> {
+    ) -> RpcResult<Vec<Vec<ExtendedEthCallResponse>>> {
         trace!(target: "rpc::eth", ?bundles, ?state_context, ?state_override, "Serving eth_callMany");
         Ok(EthCall::call_many(self, bundles, state_context, state_override).await?)
     }
