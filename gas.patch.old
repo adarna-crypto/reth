@@ -1,0 +1,304 @@
+From f92067666deea060859e1f302cc897fe543ebd3f Mon Sep 17 00:00:00 2001
+From: Rob <robs@codexsoftware.co.uk>
+Date: Tue, 22 Jul 2025 21:29:06 +0100
+Subject: [PATCH] chore: gas usage mod
+
+---
+ Cargo.lock                                    |  1 +
+ build.sh                                      |  6 +++
+ crates/rpc/rpc-eth-api/Cargo.toml             |  3 ++
+ crates/rpc/rpc-eth-api/src/core.rs            | 10 ++--
+ crates/rpc/rpc-eth-api/src/helpers/call.rs    | 39 +++++++++------
+ .../rpc-eth-api/src/helpers/call_response.rs  | 49 +++++++++++++++++++
+ crates/rpc/rpc-eth-api/src/helpers/mod.rs     |  1 +
+ 7 files changed, 89 insertions(+), 20 deletions(-)
+ create mode 100755 build.sh
+ create mode 100644 crates/rpc/rpc-eth-api/src/helpers/call_response.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 9de2bbb55..125aebd44 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -10064,6 +10064,7 @@ dependencies = [
+  "reth-trie-common",
+  "revm",
+  "revm-inspectors",
++ "serde",
+  "tokio",
+  "tracing",
+ ]
+diff --git a/build.sh b/build.sh
+new file mode 100755
+index 000000000..8996466ac
+--- /dev/null
++++ b/build.sh
+@@ -0,0 +1,6 @@
++#!/usr/bin/env bash
++set -e
++make maxperf
++echo "Successfully built reth: $(target/maxperf/reth -V)"
++echo "Now install it into /usr/local/bin but symlink it to retain the older version"
++ls -la /usr/local/bin/reth*
+diff --git a/crates/rpc/rpc-eth-api/Cargo.toml b/crates/rpc/rpc-eth-api/Cargo.toml
+index 44637d193..dd811e800 100644
+--- a/crates/rpc/rpc-eth-api/Cargo.toml
++++ b/crates/rpc/rpc-eth-api/Cargo.toml
+@@ -59,6 +59,8 @@ auto_impl.workspace = true
+ dyn-clone.workspace = true
+ tracing.workspace = true
+ 
++serde = { version = "1.0", features = ["derive"] }
++
+ [features]
+ js-tracer = ["revm-inspectors/js-tracer", "reth-rpc-eth-types/js-tracer"]
+ client = ["jsonrpsee/client", "jsonrpsee/async-client"]
+@@ -68,3 +70,4 @@ op = [
+     "reth-rpc-convert/op",
+     "alloy-evm/op",
+ ]
++#serde = ["dep:serde", "serde/derive"]
+diff --git a/crates/rpc/rpc-eth-api/src/core.rs b/crates/rpc/rpc-eth-api/src/core.rs
+index 3e6b85bde..07d08fd42 100644
+--- a/crates/rpc/rpc-eth-api/src/core.rs
++++ b/crates/rpc/rpc-eth-api/src/core.rs
+@@ -11,8 +11,8 @@ use alloy_primitives::{Address, Bytes, B256, B64, U256, U64};
+ use alloy_rpc_types_eth::{
+     simulate::{SimulatePayload, SimulatedBlock},
+     state::{EvmOverrides, StateOverride},
+-    BlockOverrides, Bundle, EIP1186AccountProofResponse, EthCallResponse, FeeHistory, Index,
+-    StateContext, SyncStatus, Work,
++    BlockOverrides, Bundle, EIP1186AccountProofResponse, FeeHistory, Index, StateContext,
++    SyncStatus, Work,
+ };
+ use alloy_serde::JsonStorageKey;
+ use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+@@ -20,6 +20,8 @@ use reth_rpc_convert::RpcTxReq;
+ use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
+ use tracing::trace;
+ 
++use crate::helpers::call_response::ExtendedEthCallResponse;
++
+ /// Helper trait, unifies functionality that must be supported to implement all RPC methods for
+ /// server.
+ pub trait FullEthApiServer:
+@@ -236,7 +238,7 @@ pub trait EthApi<TxReq: RpcObject, T: RpcObject, B: RpcObject, R: RpcObject, H:
+         bundles: Vec<Bundle<TxReq>>,
+         state_context: Option<StateContext>,
+         state_override: Option<StateOverride>,
+-    ) -> RpcResult<Vec<Vec<EthCallResponse>>>;
++    ) -> RpcResult<Vec<Vec<ExtendedEthCallResponse>>>;
+ 
+     /// Generates an access list for a transaction.
+     ///
+@@ -688,7 +690,7 @@ where
+         bundles: Vec<Bundle<RpcTxReq<T::NetworkTypes>>>,
+         state_context: Option<StateContext>,
+         state_override: Option<StateOverride>,
+-    ) -> RpcResult<Vec<Vec<EthCallResponse>>> {
++    ) -> RpcResult<Vec<Vec<ExtendedEthCallResponse>>> {
+         trace!(target: "rpc::eth", ?bundles, ?state_context, ?state_override, "Serving eth_callMany");
+         Ok(EthCall::call_many(self, bundles, state_context, state_override).await?)
+     }
+diff --git a/crates/rpc/rpc-eth-api/src/helpers/call.rs b/crates/rpc/rpc-eth-api/src/helpers/call.rs
+index 5cf101ba0..58b2e3617 100644
+--- a/crates/rpc/rpc-eth-api/src/helpers/call.rs
++++ b/crates/rpc/rpc-eth-api/src/helpers/call.rs
+@@ -5,7 +5,8 @@ use core::fmt;
+ 
+ use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
+ use crate::{
+-    helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
++    helpers::call_response::ExtendedEthCallResponse, helpers::estimate::EstimateCall, FromEvmError,
++    FullEthApiTypes, RpcBlock, RpcNodeCore,
+ };
+ use alloy_consensus::BlockHeader;
+ use alloy_eips::eip2930::AccessListResult;
+@@ -18,7 +19,7 @@ use alloy_primitives::{Bytes, B256, U256};
+ use alloy_rpc_types_eth::{
+     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
+     state::{EvmOverrides, StateOverride},
+-    BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
++    BlockId, Bundle, StateContext, TransactionInfo,
+ };
+ use futures::Future;
+ use reth_errors::{ProviderError, RethError};
+@@ -77,7 +78,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+     ) -> impl Future<Output = SimulatedBlocksResult<Self::NetworkTypes, Self::Error>> + Send {
+         async move {
+             if payload.block_state_calls.len() > self.max_simulate_blocks() as usize {
+-                return Err(EthApiError::InvalidParams("too many blocks.".to_string()).into())
++                return Err(EthApiError::InvalidParams("too many blocks.".to_string()).into());
+             }
+ 
+             let block = block.unwrap_or_default();
+@@ -90,7 +91,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+             } = payload;
+ 
+             if block_state_calls.is_empty() {
+-                return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into())
++                return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into());
+             }
+ 
+             let base_block =
+@@ -125,12 +126,12 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+                     if let Some(block_overrides) = block_overrides {
+                         // ensure we don't allow uncapped gas limit per block
+                         if let Some(gas_limit_override) = block_overrides.gas_limit {
+-                            if gas_limit_override > evm_env.block_env.gas_limit &&
+-                                gas_limit_override > this.call_gas_limit()
++                            if gas_limit_override > evm_env.block_env.gas_limit
++                                && gas_limit_override > this.call_gas_limit()
+                             {
+                                 return Err(
+                                     EthApiError::other(EthSimulateError::GasLimitReached).into()
+-                                )
++                                );
+                             }
+                         }
+                         apply_block_overrides(block_overrides, &mut db, &mut evm_env.block_env);
+@@ -153,7 +154,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+                             return Err(EthApiError::Other(Box::new(
+                                 EthSimulateError::BlockGasLimitExceeded,
+                             ))
+-                            .into())
++                            .into());
+                         }
+ 
+                         if txs_without_gas_limit > 0 {
+@@ -233,7 +234,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+         bundles: Vec<Bundle<RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>>>,
+         state_context: Option<StateContext>,
+         mut state_override: Option<StateOverride>,
+-    ) -> impl Future<Output = Result<Vec<Vec<EthCallResponse>>, Self::Error>> + Send {
++    ) -> impl Future<Output = Result<Vec<Vec<ExtendedEthCallResponse>>, Self::Error>> + Send {
+         async move {
+             // Check if the vector of bundles is empty
+             if bundles.is_empty() {
+@@ -318,16 +319,22 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+                         let (current_evm_env, prepared_tx) =
+                             this.prepare_call_env(evm_env.clone(), tx, &mut db, overrides)?;
+                         let res = this.transact(&mut db, current_evm_env, prepared_tx)?;
++                        // let (res, _) = this.transact(&mut db, current_evm_env, prepared_tx)?;
++                        let gas_used = res.result.gas_used();
+ 
+                         match ensure_success::<_, Self::Error>(res.result) {
+                             Ok(output) => {
+-                                bundle_results
+-                                    .push(EthCallResponse { value: Some(output), error: None });
++                                bundle_results.push(ExtendedEthCallResponse {
++                                    value: Some(output),
++                                    error: None,
++                                    gas_used: Some(gas_used),
++                                });
+                             }
+                             Err(err) => {
+-                                bundle_results.push(EthCallResponse {
++                                bundle_results.push(ExtendedEthCallResponse {
+                                     value: None,
+                                     error: Some(err.to_string()),
++                                    gas_used: Some(gas_used),
+                                 });
+                             }
+                         }
+@@ -420,11 +427,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
+             ExecutionResult::Halt { reason, gas_used } => {
+                 let error =
+                     Some(Self::Error::from_evm_halt(reason, tx_env.gas_limit()).to_string());
+-                return Ok(AccessListResult { access_list, gas_used: U256::from(gas_used), error })
++                return Ok(AccessListResult { access_list, gas_used: U256::from(gas_used), error });
+             }
+             ExecutionResult::Revert { output, gas_used } => {
+                 let error = Some(RevertError::new(output).to_string());
+-                return Ok(AccessListResult { access_list, gas_used: U256::from(gas_used), error })
++                return Ok(AccessListResult { access_list, gas_used: U256::from(gas_used), error });
+             }
+             ExecutionResult::Success { .. } => {}
+         };
+@@ -673,7 +680,7 @@ pub trait Call:
+         for tx in transactions {
+             if *tx.tx_hash() == target_tx_hash {
+                 // reached the target transaction
+-                break
++                break;
+             }
+ 
+             let tx_env = self.evm_config().tx_env(tx);
+@@ -733,7 +740,7 @@ pub trait Call:
+             // configured gas exceeds limit
+             return Err(
+                 EthApiError::InvalidTransaction(RpcInvalidTransactionError::GasTooHigh).into()
+-            )
++            );
+         }
+ 
+         // apply configured gas cap
+diff --git a/crates/rpc/rpc-eth-api/src/helpers/call_response.rs b/crates/rpc/rpc-eth-api/src/helpers/call_response.rs
+new file mode 100644
+index 000000000..b7ec575cb
+--- /dev/null
++++ b/crates/rpc/rpc-eth-api/src/helpers/call_response.rs
+@@ -0,0 +1,49 @@
++//! Custom EthClassResponse class so include a gas_used field in responses.
++use alloy_primitives::Bytes;
++use alloy_rpc_types_eth::EthCallResponse as AlloyEthCallResponse;
++use serde::{Deserialize, Serialize};
++
++/// Extended version of EthCallResponse with gas_used field
++#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++/// Extended response structure for Ethereum call operations.
++///
++/// This struct contains the result of an `eth_call` operation along with additional
++/// metadata such as gas usage. It accommodates both successful calls (with a value)
++/// and failed calls (with an error message).
++///
++/// # Fields
++///
++/// * `value` - The return data from a successful call operation, represented as bytes.
++///   This field is only present when the call did not encounter errors.
++///
++/// * `error` - Error message if the call operation failed. This field is only
++///   present when an error occurred during execution.
++///
++/// * `gas_used` - The amount of gas consumed by the call operation, regardless of
++///   whether it succeeded or failed. Useful for gas estimation and optimization.
++pub struct ExtendedEthCallResponse {
++    /// eth_call output (if no error)
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub value: Option<Bytes>,
++
++    /// eth_call output (if error)
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub error: Option<String>,
++
++    /// Gas used by the call
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub gas_used: Option<u64>,
++}
++
++impl From<AlloyEthCallResponse> for ExtendedEthCallResponse {
++    fn from(response: AlloyEthCallResponse) -> Self {
++        Self { value: response.value, error: response.error, gas_used: None }
++    }
++}
++
++impl From<ExtendedEthCallResponse> for AlloyEthCallResponse {
++    fn from(response: ExtendedEthCallResponse) -> Self {
++        Self { value: response.value, error: response.error }
++    }
++}
+diff --git a/crates/rpc/rpc-eth-api/src/helpers/mod.rs b/crates/rpc/rpc-eth-api/src/helpers/mod.rs
+index 27d23da74..5e78c6981 100644
+--- a/crates/rpc/rpc-eth-api/src/helpers/mod.rs
++++ b/crates/rpc/rpc-eth-api/src/helpers/mod.rs
+@@ -17,6 +17,7 @@
+ pub mod block;
+ pub mod blocking_task;
+ pub mod call;
++pub mod call_response;
+ pub mod estimate;
+ pub mod fee;
+ pub mod pending_block;
+-- 
+2.43.0
+
